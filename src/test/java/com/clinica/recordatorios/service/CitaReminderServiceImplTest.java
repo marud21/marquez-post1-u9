@@ -18,13 +18,17 @@ import java.time.Instant;
 import java.time.LocalDateTime;
 import java.time.ZoneId;
 import java.util.List;
+import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.contains;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
@@ -46,6 +50,10 @@ class CitaReminderServiceImplTest {
     @Mock
     private ReminderChannel reminderChannelMock;
 
+    // Mock del canal urgente: solo existe un punto de sustitucion despues del refactor DIP
+    @Mock
+    private ReminderChannel canalUrgenteMock;
+
     // Fake (NO Mockito): Clock.fixed es una implementacion real y completa de java.time.Clock
     // con el instante congelado; LocalDateTime.now(clock) funciona igual que en produccion.
     private final Clock clockFijo = Clock.fixed(Instant.parse("2026-08-10T09:00:00Z"), ZoneId.of("UTC"));
@@ -54,7 +62,8 @@ class CitaReminderServiceImplTest {
 
     @BeforeEach
     void setUp() {
-        citaReminderService = new CitaReminderServiceImpl(citaRepository, reminderChannelFactory, clockFijo);
+        citaReminderService = new CitaReminderServiceImpl(
+                citaRepository, reminderChannelFactory, canalUrgenteMock, clockFijo);
     }
 
     @Test
@@ -121,5 +130,43 @@ class CitaReminderServiceImplTest {
         orden.verify(citaRepository).save(email);
         orden.verify(smsMock).enviar(eq(sms), anyString());
         orden.verify(citaRepository).save(sms);
+    }
+
+    @Test
+    void enviarRecordatorioUrgente_citaExistente_usaCanalUrgenteInyectado() {
+        Cita cita = new Cita(5L, "Luis Peña", "3001234567",
+                LocalDateTime.of(2026, 8, 10, 10, 30), CanalNotificacion.SMS, false);
+        when(citaRepository.findById(5L)).thenReturn(Optional.of(cita));
+
+        citaReminderService.enviarRecordatorioUrgente(5L);
+
+        verify(canalUrgenteMock, times(1)).enviar(eq(cita), contains("URGENTE"));
+        verify(citaRepository).save(cita);
+        verifyNoInteractions(reminderChannelFactory);
+        assertTrue(cita.isRecordatorioEnviado());
+    }
+
+    @Test
+    void enviarRecordatorioUrgente_gatewayFalla_noMarcaComoEnviado() {
+        // Imposible de escribir antes del refactor: no habia donde sustituir el canal por un mock
+        Cita cita = new Cita(6L, "Marta Ruiz", "3009876543",
+                LocalDateTime.of(2026, 8, 10, 10, 30), CanalNotificacion.SMS, false);
+        when(citaRepository.findById(6L)).thenReturn(Optional.of(cita));
+        doThrow(new RuntimeException("Gateway de SMS no disponible"))
+                .when(canalUrgenteMock).enviar(any(), anyString());
+
+        assertThrows(RuntimeException.class, () -> citaReminderService.enviarRecordatorioUrgente(6L));
+
+        verify(citaRepository, never()).save(any());
+        assertFalse(cita.isRecordatorioEnviado());
+    }
+
+    @Test
+    void enviarRecordatorioUrgente_citaInexistente_lanzaCitaNoEncontradaException() {
+        when(citaRepository.findById(99L)).thenReturn(Optional.empty());
+
+        assertThrows(CitaNoEncontradaException.class, () -> citaReminderService.enviarRecordatorioUrgente(99L));
+
+        verifyNoInteractions(canalUrgenteMock);
     }
 }
